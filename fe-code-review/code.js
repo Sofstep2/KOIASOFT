@@ -4,27 +4,22 @@ app.post('/api/extract', upload.single('file'), async (req, res) => {
 
     if (req.body) {
         const file = req.file;
-        const requestID = req.body.requestID;
-        const project = req.body.project;
-        const idUser = req.body.userID;
+        const {body:{requestID,project,idUser}}= req
         const user = await User.findOne(idUser);
 
         if (requestID && project && idUser && user) {
             logDebug('User with role '+user.role, user);
             if (user.role === 'ADVISOR' || user.role.indexOf('ADVISOR') > -1)
                 return res.json({requestID, step: 999, status: 'DONE', message: 'Nothing to do for ADVISOR role'});
-
             /* reset status variables */
             await db.updateStatus(requestID, 1, '');
 
             logDebug('CONFIG:', config.projects);
             if (project === 'inkasso' && config.projects.hasOwnProperty(project) && file) {
-                const hashSum = crypto.createHash('sha256');
                 const fileHash = idUser;
                 const fileName = 'fullmakt';
                 const fileType = mime.getExtension(file.mimetype);
-                if (fileType !== 'pdf')
-                    return res.status(500).json({requestID, message: 'Missing pdf file'});
+                if (fileType !== 'pdf') return res.status(500).json({requestID, message: 'Missing pdf file'});
                 await db.updateStatus(requestID, 3, '');
 
                 const folder = `${project}-signed/${idUser}`;
@@ -36,22 +31,16 @@ app.post('/api/extract', upload.single('file'), async (req, res) => {
 
                 await db.updateStatus(requestID, 5, '');
 
-                let sent = true;
                 const debtCollectors = await db.getDebtCollectors();
                 logDebug('debtCollectors=', debtCollectors);
-                if (!debtCollectors)
-                    return res.status(500).json({requestID, message: 'Failed to get debt collectors'});
-
-                if (!!(await db.hasUserRequestKey(idUser))) { //FIX: check age, not only if there's a request or not
-                    return res.json({requestID, step: 999, status: 'DONE', message: 'Emails already sent'});
-                }
+                if (!debtCollectors) return res.status(500).json({requestID, message: 'Failed to get debt collectors'});
+                if (!!(await db.hasUserRequestKey(idUser))) return res.json({requestID, step: 999, status: 'DONE', message: 'Emails already sent'});
 
                 const sentStatus = {};
                 for (let i = 0; i < debtCollectors.length ; i++) {
                     await db.updateStatus(requestID, 10+i, '');
-                    const idCollector = debtCollectors[i].id;
-                    const collectorName = debtCollectors[i].name;
-                    const collectorEmail = debtCollectors[i].email;
+
+                    const {idCollector,collectorName,collectorEmail} = debtCollectors[i]
                     const hashSum = crypto.createHash('sha256');
                     const hashInput = `${idUser}-${idCollector}-${(new Date()).toISOString()}`;
                     logDebug('hashInput=', hashInput);
@@ -61,15 +50,18 @@ app.post('/api/extract', upload.single('file'), async (req, res) => {
 
                     const hash = Buffer.from(`${idUser}__${idCollector}`, 'utf8').toString('base64')
 
-                    if (!!(await db.setUserRequestKey(requestKey, idUser))
-                        && !!(await db.setUserCollectorRequestKey(requestKey, idUser, idCollector))) {
+                    if ((await db.setUserRequestKey(requestKey, idUser))
+                        && (await db.setUserCollectorRequestKey(requestKey, idUser, idCollector))) {
 
                         /* prepare email */
+
+
+                        const {email: {sender, replyTo, apiKey,template:{collector}}} = config.projects[project]
                         const sendConfig = {
-                            sender: config.projects[project].email.sender,
-                            replyTo: config.projects[project].email.replyTo,
-                            subject: 'Email subject,
-                            templateId: config.projects[project].email.template.collector,
+                            sender: sender,
+                            replyTo: replyTo,
+                            subject: 'Email subject',
+                            templateId: collector,
                             params: {
                                 downloadUrl: `https://url.go/download?requestKey=${requestKey}&hash=${hash}`,
                                 uploadUrl: `https://url.go/upload?requestKey=${requestKey}&hash=${hash}`,
@@ -87,7 +79,7 @@ app.post('/api/extract', upload.single('file'), async (req, res) => {
                         }
 
                         /* send email */
-                        const resp = await email.send(sendConfig, config.projects[project].email.apiKey);
+                        const resp = await email.send(sendConfig, apiKey);
                         logDebug('extract() resp=', resp);
 
                         // update DB with result
@@ -107,18 +99,15 @@ app.post('/api/extract', upload.single('file'), async (req, res) => {
                 logDebug('FINAL SENT STATUS:');
                 console.dir(sentStatus, {depth: null});
 
-                //if (!allSent)
-                //return res.status(500).json({requestID, message: 'Failed sending email'});
-
                 await db.updateStatus(requestID, 500, '');
 
                 /* prepare summary email */
+                const {email: {sender, replyTo,template:{summary}}} = config.projects[project]
                 const summaryConfig = {
-                    //bcc: [{ email: 'tomas@inkassoregisteret.com', name: 'Tomas' }],
-                    sender: config.projects[project].email.sender,
-                    replyTo: config.projects[project].email.replyTo,
+                    sender: sender,
+                    replyTo: replyTo,
                     subject: 'Oppsummering Kravsforespørsel',
-                    templateId: config.projects[project].email.template.summary,
+                    templateId: summary,
                     params: {
                         collectors: sentStatus,
                     },
@@ -126,10 +115,6 @@ app.post('/api/extract', upload.single('file'), async (req, res) => {
                     to: [{ email: 'tomas@upscore.no' , name: 'Tomas' }], // FIXXX: config.projects[project].email.sender
                 };
                 logDebug('Summary config:', summaryConfig);
-
-                /* send email */
-                //const respSummary = await email.send(sendConfig, config.projects[project].email.apiKey);
-                //logDebug('extract() summary resp=', respSummary);
 
                 await db.updateStatus(requestID, 900, '');
             }
